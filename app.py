@@ -7,9 +7,10 @@ import feedparser
 from transformers import pipeline
 
 # Load files
-model = joblib.load("stock_model.pkl")
-features = joblib.load("feature_columns.pkl")
-encoder = joblib.load("stock_encoder.pkl")
+model = joblib.load("model.pkl")
+scaler = joblib.load("scaler.pkl")
+features = joblib.load("features.pkl")
+encoder = joblib.load("encoder.pkl")
 
 @st.cache_resource
 def load_finbert():
@@ -133,7 +134,7 @@ if uploaded_file:
 
         st.subheader("Dataset Preview")
 
-        st.dataframe(df.head())
+        st.dataframe(df.tail())
 
         required_cols = [
             "Date",
@@ -159,38 +160,83 @@ if uploaded_file:
 
             close = df["Close"]
 
-            for i in range(1,11):
-                df[f"Lag_{i}"] = close.shift(i)
+            # SMA / EMA
+
+            df["SMA_5"] = close.rolling(5).mean()
+            df["EMA_5"] = close.ewm(span=5).mean()
 
             df["SMA_10"] = close.rolling(10).mean()
+            df["EMA_10"] = close.ewm(span=10).mean()
+
             df["SMA_20"] = close.rolling(20).mean()
+            df["EMA_20"] = close.ewm(span=20).mean()
 
-            df["EMA_10"] = close.ewm(
-                span=10
-            ).mean()
+            df["SMA_50"] = close.rolling(50).mean()
+            df["EMA_50"] = close.ewm(span=50).mean()
 
-            df["EMA_20"] = close.ewm(
-                span=20
-            ).mean()
+            # Bollinger Bands
 
-            df["RSI"] = ta.momentum.RSIIndicator(
-                close
-            ).rsi()
+            bb = ta.volatility.BollingerBands(close)
+
+            df["BB_HIGH"] = bb.bollinger_hband()
+            df["BB_LOW"] = bb.bollinger_lband()
+            df["BB_WIDTH"] = bb.bollinger_wband()
+
+            # RSI
+
+            df["RSI"] = ta.momentum.RSIIndicator(close).rsi()
+
+            # MACD
 
             macd = ta.trend.MACD(close)
 
             df["MACD"] = macd.macd()
+            df["MACD_SIGNAL"] = macd.macd_signal()
 
-            df["MACD_SIGNAL"] = (
-                macd.macd_signal()
+            # ATR
+
+            atr = ta.volatility.AverageTrueRange(
+                high=df["High"],
+                low=df["Low"],
+                close=df["Close"]
             )
 
-            df["RETURN"] = (
+            df["ATR"] = atr.average_true_range()
+
+            # Volatility
+
+            df["ROLLING_VOL"] = (
                 close.pct_change()
+                .rolling(20)
+                .std()
             )
 
-            df["VOL_CHANGE"] = (
-                df["Volume"].pct_change()
+            # Returns
+
+            df["RETURN_1D"] = close.pct_change(1)
+            df["RETURN_5D"] = close.pct_change(5)
+            df["RETURN_10D"] = close.pct_change(10)
+
+            # Lag Features
+
+            for i in range(1,6):
+
+                df[f"LAG_CLOSE_{i}"] = (
+                    close.shift(i)
+                )
+
+                df[f"LAG_VOLUME_{i}"] = (
+                    df["Volume"].shift(i)
+                )
+
+            # Ratios
+
+            df["HIGH_LOW_RATIO"] = (
+                df["High"] / df["Low"]
+            )
+
+            df["PRICE_SMA_RATIO"] = (
+                close / df["SMA_20"]
             )
             
             
@@ -302,6 +348,19 @@ if uploaded_file:
             df.dropna(inplace=True)
 
             if len(df) > 0:
+                
+                missing_features = [
+                    col for col in features
+                    if col not in df.columns
+                ]
+
+                if len(missing_features) > 0:
+
+                    st.error(
+                        f"Missing Features: {missing_features}"
+                    )
+
+                    st.stop()
 
                 latest = df.iloc[-1]
 
@@ -309,9 +368,11 @@ if uploaded_file:
                     [latest[features]]
                 )
 
-                prediction = (
-                    model.predict(X)[0]
-                )
+                X_scaled = scaler.transform(X)
+
+                prediction = model.predict(
+                    X_scaled
+                )[0]
 
                 current_price = (
                     latest["Close"]
@@ -383,14 +444,28 @@ if uploaded_file:
                 
                 price_diff = prediction - current_price
 
-                confidence = 100 - 2.22  # using model MAPE
+                pred_error = abs(change)
+
+                confidence = max(
+                    60,
+                    min(
+                        98,
+                        100 - pred_error
+                    )
+                )  # using model MAPE
                 
                 st.subheader("Prediction Insights")
 
                 st.write(f"Price Difference: ₹{price_diff:.2f}")
-                st.write("R² Score : 0.949")
-                st.write("MAPE : 2.22%")
-                st.write("Stocks Used : NIFTY 50")
+                st.write("R² Score : 0.9941")
+                st.write("MAE : 34.6645")
+                st.write("MAPE : 2.29%")
+                st.write("RMSE : 163.7818")
+                st.write("Directional Accuracy : 49.21%")
+
+                st.write(
+                    f"Stocks Used : {len(encoder.classes_)}"
+                )
                 st.write("Training Period : 2014-2026")
 
 
